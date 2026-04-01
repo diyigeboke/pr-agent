@@ -64,9 +64,22 @@ def is_bot_user(data) -> bool:
     try:
         # logic to ignore bot users (unlike Github, no direct flag for bot users in gitlab)
         sender_name = data.get("user", {}).get("name", "unknown").lower()
-        bot_indicators = ['codium', 'bot_', 'bot-', '_bot', '-bot']
+        sender_username = data.get("user", {}).get("username", "").lower()
+
+        # Default bot indicators
+        bot_indicators = ['codium', 'bot_', 'bot-', '_bot', '-bot', 'reviewer']
+
+        # Allow user to configure additional bot usernames via GITLAB_APP.IGNORE_BOT_USERS
+        custom_bot_users = get_settings().get("GITLAB_APP.IGNORE_BOT_USERS", [])
+        if custom_bot_users:
+            bot_indicators.extend([u.lower() for u in custom_bot_users])
+
         if any(indicator in sender_name for indicator in bot_indicators):
             get_logger().info(f"Skipping GitLab bot user: {sender_name}")
+            return True
+        # Also check username (for cases like "code-reviewer")
+        if any(indicator in sender_username for indicator in bot_indicators):
+            get_logger().info(f"Skipping GitLab bot user (by username): {sender_username}")
             return True
     except Exception as e:
         get_logger().error(f"Failed 'is_bot_user' logic: {e}")
@@ -257,6 +270,10 @@ async def gitlab_webhook(background_tasks: BackgroundTasks, request: Request):
                 await _perform_commands_gitlab("pr_commands", PRAgent(), url, log_context, data)
 
         elif data.get('object_kind') == 'note' and data.get('event_type') == 'note': # comment on MR
+            # ignore bot users for comment events
+            if is_bot_user(data):
+                return JSONResponse(status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "success"}))
+
             if 'merge_request' in data:
                 mr = data['merge_request']
                 url = mr.get('url')
