@@ -239,7 +239,7 @@ class PRReviewer:
                          first_key=first_key, last_key=last_key)
         github_action_output(data, 'review')
 
-        if 'review' not in data:
+        if 'review' not in data or data.get('review') is None:
             get_logger().exception("Failed to parse review data", artifact={"data": data})
             return ""
 

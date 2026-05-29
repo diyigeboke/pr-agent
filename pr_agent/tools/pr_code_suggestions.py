@@ -492,6 +492,12 @@ class PRCodeSuggestions:
         if isinstance(data, list):
             data = {'code_suggestions': data}
 
+        # normalize field names - some models (e.g. MiniMax) output 'relevant_code' instead of 'relevant_file'
+        for suggestion in data.get('code_suggestions', []):
+            if 'relevant_code' in suggestion and 'relevant_file' not in suggestion:
+                suggestion['relevant_file'] = suggestion.pop('relevant_code')
+                get_logger().info("Normalized 'relevant_code' to 'relevant_file' in code suggestion")
+
         # remove or edit invalid suggestions
         suggestion_list = []
         one_sentence_summary_list = []
