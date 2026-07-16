@@ -20,7 +20,8 @@ from ..algo.utils import (clip_tokens,
                           load_large_diff)
 from ..config_loader import get_settings
 from ..log import get_logger
-from .git_provider import MAX_FILES_ALLOWED_FULL, GitProvider
+from .git_provider import (MAX_FILES_ALLOWED_FULL, GitProvider,
+                           get_cached_global_settings)
 
 
 class DiffNotFoundError(Exception):
@@ -290,6 +291,8 @@ class GitLabProvider(GitProvider):
         if capability in ['get_issue_comments', 'create_inline_comment', 'publish_inline_comments',
             'publish_file_comments']: # gfm_markdown is supported in gitlab !
             return False
+        if capability == "push_code" and get_settings().config.restricted_mode:
+            return False
         return True
 
     def _get_project_path_from_pr_or_issue_url(self, pr_or_issue_url: str) -> str:
@@ -485,7 +488,8 @@ class GitLabProvider(GitProvider):
 
     def publish_description(self, pr_title: str, pr_body: str):
         try:
-            self.mr.title = pr_title
+            if pr_title is not None:
+                self.mr.title = pr_title
             self.mr.description = pr_body
             self.mr.save()
         except Exception as e:
@@ -670,9 +674,8 @@ class GitLabProvider(GitProvider):
                 target_file = None
                 for file in diff_files:
                     if file.filename == relevant_file:
-                        if file.filename == relevant_file:
-                            target_file = file
-                            break
+                        target_file = file
+                        break
                 if target_file is None:
                     get_logger().warning(f"Skipping suggestion: file '{relevant_file}' not found in diff")
                     continue
@@ -793,11 +796,59 @@ class GitLabProvider(GitProvider):
         return self.mr.notes.list(get_all=True)[::-1]
 
     def get_repo_settings(self):
+        settings_files = []
+        global_settings = self._get_global_repo_settings()
+        if global_settings:
+            settings_files.append(("global", global_settings))
         try:
             main_branch = self.gl.projects.get(self.id_project).default_branch
             contents = self.gl.projects.get(self.id_project).files.get(file_path='.pr_agent.toml', ref=main_branch).decode()
-            return contents
-        except Exception:
+            if contents:
+                settings_files.append(("local", contents))
+        except GitlabGetError:
+            pass  # a missing local .pr_agent.toml is expected
+        except Exception as e:
+            get_logger().warning(f"Failed to load local .pr_agent.toml file, error: {e}")
+        return settings_files if settings_files else ""
+
+    def _get_global_repo_settings(self):
+        # Load an org-wide <group>/pr-agent-settings/.pr_agent.toml (GitLab.com groups only).
+        if not get_settings().config.use_global_settings_file:
+            return ""
+        if not getattr(self, "gl", None) or not getattr(self, "id_project", None):
+            return ""
+        # Group-level global settings are GitLab.com only. Match the host exactly so a self-hosted
+        # instance whose hostname merely contains "gitlab.com" (e.g. "mygitlab.com") is not treated
+        # as GitLab.com. get_pr_owner_id returns the top-level group on gitlab.com.
+        host = (urlparse(self.gitlab_url).hostname or "").lower() if self.gitlab_url else ""
+        group = self.get_pr_owner_id()
+        if not group or host != "gitlab.com":
+            return ""
+        return get_cached_global_settings(
+            f"gitlab:{group}", lambda: self._fetch_global_repo_settings(group))
+
+    def _fetch_global_repo_settings(self, group):
+        try:
+            project = self.gl.projects.get(f"{group}/pr-agent-settings")
+            return project.files.get(file_path='.pr_agent.toml', ref=project.default_branch).decode()
+        except GitlabGetError:
+            # A missing pr-agent-settings project/file is an expected fallback -> return "" (cached).
+            return ""
+        # Transient/unexpected errors propagate so the caller does not cache the failure.
+
+    def get_repo_file_content(self, file_path: str, from_default_branch: bool = False):
+        try:
+            project = self.gl.projects.get(self.id_project)
+            # Read from the MR target branch (the branch being merged into), matching the other
+            # providers; fall back to the project default branch outside of an MR context, or
+            # always when from_default_branch is requested.
+            if from_default_branch:
+                ref = project.default_branch
+            else:
+                ref = getattr(self.mr, "target_branch", None) or project.default_branch
+            contents = project.files.get(file_path=file_path, ref=ref).decode()
+            return decode_if_bytes(contents)
+        except GitlabGetError:
             return ""
 
     def get_workspace_name(self):

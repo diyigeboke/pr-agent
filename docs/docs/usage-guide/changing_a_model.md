@@ -327,12 +327,12 @@ See [litellm](https://docs.litellm.ai/docs/providers/bedrock#usage) documentatio
 
 ### DeepSeek
 
-To use deepseek-chat model with DeepSeek, for example, set:
+To use deepseek-v4 model with DeepSeek, for example, set:
 
 ```toml
 [config] # in configuration.toml
-model = "deepseek/deepseek-chat"
-fallback_models=["deepseek/deepseek-chat"]
+model = "deepseek/deepseek-v4-pro"
+fallback_models=["deepseek/deepseek-v4-flash"]
 ```
 
 and fill up your key
@@ -342,7 +342,7 @@ and fill up your key
 key = ...
 ```
 
-(you can obtain a deepseek-chat key from [here](https://platform.deepseek.com))
+(you can obtain a deepseek-v4 key from [here](https://platform.deepseek.com/api_keys))
 
 ### DeepInfra
 
@@ -385,6 +385,21 @@ key = "..." # your Codestral api key
 ```
 
 (you can obtain a Codestral key from [here](https://console.mistral.ai/codestral))
+
+### Databricks
+
+To use a model hosted on Databricks (e.g. an Azure Databricks serving endpoint), set:
+
+```toml
+[config] # in configuration.toml
+model = "databricks/databricks-claude-sonnet-4"
+fallback_models = ["databricks/databricks-claude-sonnet-4"]
+[databricks] # in .secrets.toml
+api_key = "..." # your Databricks personal access token (PAT)
+api_base = "https://adb-xxxx.azuredatabricks.net/serving-endpoints" # your workspace serving-endpoints URL
+```
+
+The model name after the `databricks/` prefix is the name of your serving endpoint. See LiteLLM's [Databricks provider docs](https://docs.litellm.ai/docs/providers/databricks) for details.
 
 ### Openrouter
 
@@ -445,3 +460,22 @@ enable_claude_extended_thinking = false # Set to true to enable extended thinkin
 extended_thinking_budget_tokens = 2048
 extended_thinking_max_output_tokens = 4096
 ```
+
+By default, PR-Agent applies the extended-thinking payload only to a built-in list of Claude models
+(see `CLAUDE_EXTENDED_THINKING_MODELS` in `pr_agent/algo/__init__.py`). If you use a newer or custom
+Claude model that is not in that list, you can override it:
+
+```toml
+[config]
+claude_extended_thinking_models_override = ["anthropic/claude-my-new-model"]
+```
+
+When `claude_extended_thinking_models_override` is non-empty, it fully replaces the built-in list, so
+include every model that should receive extended thinking. Leave it empty (the default) to use the
+built-in defaults.
+
+!!! note "Only models that accept a thinking budget are supported"
+    PR-Agent enables extended thinking through the manual
+    `thinking={"type": "enabled", "budget_tokens": ...}` request. Adaptive-only Claude models
+    (e.g. Opus 4.7/4.8, Sonnet 5, Fable 5) reject `budget_tokens` and will error if you add them to
+    the list — they are intentionally excluded from the built-in defaults.

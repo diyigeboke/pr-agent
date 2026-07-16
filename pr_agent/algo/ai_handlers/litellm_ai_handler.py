@@ -200,6 +200,14 @@ class LiteLLMAIHandler(BaseAiHandler):
         if get_settings().get("CODESTRAL.KEY", None):
             os.environ["CODESTRAL_API_KEY"] = get_settings().get("CODESTRAL.KEY")
 
+        # Support Databricks-hosted models (e.g. Azure Databricks serving endpoints).
+        # Uses PAT/key authentication via LiteLLM's env vars.
+        # SEE https://docs.litellm.ai/docs/providers/databricks
+        if get_settings().get("DATABRICKS.API_KEY", None):
+            os.environ["DATABRICKS_API_KEY"] = get_settings().get("DATABRICKS.API_KEY")
+        if get_settings().get("DATABRICKS.API_BASE", None):
+            os.environ["DATABRICKS_API_BASE"] = get_settings().get("DATABRICKS.API_BASE")
+
         # Check for Azure AD configuration
         if get_settings().get("AZURE_AD.CLIENT_ID", None):
             self.azure = True
@@ -234,8 +242,26 @@ class LiteLLMAIHandler(BaseAiHandler):
         # Models that support reasoning effort
         self.support_reasoning_models = SUPPORT_REASONING_EFFORT_MODELS
 
-        # Models that support extended thinking
-        self.claude_extended_thinking_models = CLAUDE_EXTENDED_THINKING_MODELS
+        # Models that support extended thinking (config override replaces the built-in list when non-empty)
+        override = get_settings().config.get("claude_extended_thinking_models_override", []) or []
+        if override and not isinstance(override, list):
+            get_logger().warning(
+                "Invalid claude_extended_thinking_models_override in config; expected a list of model names. "
+                "Falling back to the built-in Claude extended-thinking model list."
+            )
+            override = []
+        elif override and not all(isinstance(model, str) and model.strip() for model in override):
+            get_logger().warning(
+                "Invalid claude_extended_thinking_models_override in config; "
+                "expected a list of model name strings. "
+                "Falling back to the built-in Claude extended-thinking model list."
+            )
+            override = []
+        # Store stripped names so exact-match checks against the model succeed even when the config
+        # entries contain surrounding whitespace (validation above already used model.strip()).
+        self.claude_extended_thinking_models = (
+            [model.strip() for model in override] if override else CLAUDE_EXTENDED_THINKING_MODELS
+        )
 
         # Models that require streaming
         self.streaming_required_models = STREAMING_REQUIRED_MODELS
@@ -408,7 +434,16 @@ class LiteLLMAIHandler(BaseAiHandler):
             try:
                 resp, finish_reason = None, None
                 deployment_id = self.deployment_id
-                if self.azure:
+                # Capture the original model string so an explicit provider prefix in the
+                # user config (e.g. "azure/gpt-5...") can be preserved when the GPT-5 branch
+                # rebuilds the routed model name below.
+                user_model = model
+                # Capture the provider prefix before any rewriting below. Databricks auth/endpoint
+                # selection keys off this; rewriting (e.g. 'azure/' + model when Azure is enabled in
+                # a multi-provider config) would otherwise hide the 'databricks/' prefix and bypass
+                # the guards that keep Databricks on its own DATABRICKS_API_KEY/DATABRICKS_API_BASE.
+                is_databricks = model.startswith("databricks/")
+                if self.azure and not is_databricks:
                     model = 'azure/' + model
                 if 'claude' in model and not system:
                     system = "No system prompt provided"
@@ -431,7 +466,15 @@ class LiteLLMAIHandler(BaseAiHandler):
                                               {"type": "image_url", "image_url": {"url": img_path}}]
 
                 thinking_kwargs_gpt5 = None
-                if model.startswith('gpt-5'):
+                # Detect GPT-5 family regardless of provider prefix(es) on the model name.
+                # Users sometimes put a provider prefix in config (e.g. "openai/gpt-5.1-codex-max"),
+                # and Azure mode auto-prepends "azure/", which together can produce stacked prefixes
+                # like "azure/openai/gpt-5...". Without normalization the GPT-5 path is skipped and
+                # litellm rejects the request with UnsupportedParamsError for temperature=0.2.
+                model_base = model
+                while model_base.startswith(('openai/', 'azure/')):
+                    model_base = model_base.removeprefix('openai/').removeprefix('azure/')
+                if model_base.startswith('gpt-5'):
                     # Use configured reasoning_effort or default to MEDIUM
                     config_effort = get_settings().config.reasoning_effort
                     try:
@@ -450,7 +493,18 @@ class LiteLLMAIHandler(BaseAiHandler):
                         "allowed_openai_params": ["reasoning_effort"],
                     }
                     get_logger().info(f"Using reasoning_effort='{effort}' for GPT-5 model")
-                    model = 'openai/'+model.replace('_thinking', '')  # remove _thinking suffix
+                    # Routing priority: Azure mode > explicit provider prefix in user config > openai/
+                    # default. This preserves an explicit "azure/" the user wrote in config even when
+                    # self.azure is false, and avoids stacking when self.azure already added "azure/".
+                    if self.azure:
+                        provider_prefix = 'azure/'
+                    elif user_model.startswith('azure/'):
+                        provider_prefix = 'azure/'
+                    elif user_model.startswith('openai/'):
+                        provider_prefix = 'openai/'
+                    else:
+                        provider_prefix = 'openai/'
+                    model = provider_prefix + model_base.replace('_thinking', '')  # remove _thinking suffix
 
 
                 # Currently, some models do not support a separate system and user prompts
@@ -461,12 +515,16 @@ class LiteLLMAIHandler(BaseAiHandler):
                     messages = [{"role": "user", "content": user}]
 
                 # Build request kwargs after normalizing messages for the target model.
+                # Databricks selects its endpoint via the DATABRICKS_API_BASE env var; don't let an
+                # api_base configured by another provider (OpenRouter/Ollama/Azure AD/OpenAI) during
+                # __init__ override it in multi-provider configs. None lets LiteLLM read the env var.
+                api_base = os.environ.get("DATABRICKS_API_BASE") if is_databricks else self.api_base
                 kwargs = {
                         "model": model,
                         "deployment_id": deployment_id,
                         "messages": messages,
                         "timeout": get_settings().config.ai_timeout,
-                        "api_base": self.api_base,
+                        "api_base": api_base,
                     }
 
                 # Add temperature only if model supports it
@@ -540,7 +598,10 @@ class LiteLLMAIHandler(BaseAiHandler):
 
                 # Inject api_key to the call. This key is populated during init by providers
                 # like Groq, SambaNova, XAI, Azure AD, and OpenRouter. Skip if None or placeholder.
-                if litellm.api_key and litellm.api_key != DUMMY_LITELLM_API_KEY:
+                # Databricks authenticates via the DATABRICKS_API_KEY/DATABRICKS_API_BASE env vars,
+                # so don't override it with another provider's key in multi-provider configs.
+                if (litellm.api_key and litellm.api_key != DUMMY_LITELLM_API_KEY
+                        and not is_databricks):
                     kwargs["api_key"] = litellm.api_key
 
                 # Get completion with automatic streaming detection
