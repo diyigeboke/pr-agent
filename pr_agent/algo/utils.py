@@ -749,9 +749,18 @@ def _fix_key_value(key: str, value: str):
     return key, value
 
 
+def _strip_markdown_fences(text: str) -> str:
+    text = text.strip()
+    # 去前导 --- / ```yaml / ``` (可叠加)
+    text = re.sub(r'\A(?:---\s*\n|```(?:ya?ml)?\s*\n)+', '', text)
+    # 去尾部 --- / ``` (可叠加，任意组合)
+    text = re.sub(r'(?:\n?```\s*|\n?---\s*)+\Z', '', text)
+    return text.strip()
+
+
 def load_yaml(response_text: str, keys_fix_yaml: List[str] = [], first_key="", last_key="") -> dict:
     response_text_original = copy.deepcopy(response_text)
-    response_text = response_text.strip('\n').removeprefix('yaml').removeprefix('```yaml').rstrip().removesuffix('```')
+    response_text = _strip_markdown_fences(response_text)
     try:
         data = yaml.safe_load(response_text)
     except Exception as e:
