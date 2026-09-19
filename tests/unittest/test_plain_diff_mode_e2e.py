@@ -1,11 +1,13 @@
+import json
+
 import pytest
 
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
-from pr_agent.config_loader import get_settings
+from pr_agent.config_loader import _find_repository_root, get_settings
 from pr_agent.git_providers.plain_diff_provider import PlainDiffGitProvider
 
 # Diff-mode settings keys these tests mutate on the process-wide singleton.
-_SETTINGS_KEYS = ["plain_diff.content", "plain_diff.output_path",
+_SETTINGS_KEYS = ["plain_diff.content", "plain_diff.output_path", "plain_diff.json_output_path",
                   "config.git_provider", "config.publish_output"]
 
 
@@ -23,6 +25,16 @@ def cfg():
     yield _set
     for key, value in saved.items():
         s.set(key, value)
+
+
+def test_find_repository_root_supports_git_worktree_file(tmp_path, monkeypatch):
+    repo_root = tmp_path / "worktree"
+    nested = repo_root / "src"
+    nested.mkdir(parents=True)
+    (repo_root / ".git").write_text("gitdir: /tmp/main/.git/worktrees/worktree\n")
+    monkeypatch.chdir(nested)
+
+    assert _find_repository_root() == repo_root
 
 
 DIFF = """diff --git a/foo.py b/foo.py
@@ -53,6 +65,21 @@ def test_provider_end_to_end_files_and_output(cfg, capsys):
     # output reaches stdout
     provider.publish_comment("## PR Review\n- finding one")
     assert "finding one" in capsys.readouterr().out
+
+
+def test_provider_writes_structured_review(cfg, tmp_path):
+    output = tmp_path / "review.json"
+    cfg("plain_diff.content", DIFF)
+    cfg("plain_diff.output_path", None)
+    cfg("plain_diff.json_output_path", str(output))
+    provider = PlainDiffGitProvider(None)
+
+    provider.publish_structured_review({"review": {"key_issues_to_review": []}, "usage": {}})
+
+    assert json.loads(output.read_text()) == {
+        "review": {"key_issues_to_review": []},
+        "usage": {},
+    }
 
 
 def test_base_file_reconstructed_from_working_tree(cfg, tmp_path, monkeypatch):
