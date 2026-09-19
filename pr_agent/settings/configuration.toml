@@ -90,7 +90,7 @@ ignore_language_framework = [] # a list of code-generation languages or framewor
 # The match is case-insensitive against the sender's display name. Overriding this
 # setting REPLACES the default list — include the entries below in your override if
 # you want to keep them (e.g. `["codium", "bot_", "bot-", "_bot", "-bot", "renovate"]`).
-bot_user_indicators = ["codium", "bot_", "bot-", "_bot", "-bot"]
+bot_user_indicators = ["codium", "bot_", "bot-", "_bot", "-bot", "reviewer"]
 #
 restricted_mode = false # when true, skip operations that require elevated permissions (e.g. pushing code to the repository)
 is_auto_command = false # will be auto-set to true if the command is triggered by an automation
