@@ -72,9 +72,75 @@ def should_skip_patch(filename):
     return False
 
 
+def _strip_code_literals(line: str) -> str:
+    """Drop string/char literals and trailing line comments so their braces are not counted."""
+    line = line.split('//')[0]
+    out = []
+    quote = ''
+    escaped = False
+    for ch in line:
+        if escaped:
+            escaped = False
+        elif quote and ch == '\\':
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = ''
+        elif ch in ('"', "'"):
+            quote = ch
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def _dynamic_after_extra_lines(file_lines, anchor_index: int, hunk_end_index: int, cap: int) -> int:
+    """Extra lines to append after a hunk so the block containing the change is closed.
+
+    The before-side already extends up to the enclosing declaration. Without a matching
+    extension below, the reviewer sees where a block starts but never where it ends, and
+    cannot tell whether the code after the change still assumes the old behaviour.
+
+    The anchor is the first *changed* line, not the end of the hunk: a hunk's trailing
+    context often reaches into a nested block, and anchoring there would close that inner
+    block immediately, yielding nothing.
+
+    The extension is truncated to ``cap`` when the block closes further down, mirroring the
+    before-side. Returns 0 only when no enclosing block is found at all, which leaves the
+    caller on its fixed setting.
+    """
+    if cap <= 0 or not file_lines or anchor_index >= len(file_lines):
+        return 0
+    depth = 0
+    for i in range(anchor_index, len(file_lines)):
+        line = _strip_code_literals(file_lines[i])
+        depth += line.count('{') - line.count('}')
+        if depth < 0:
+            # This line closes the block the change sits in.
+            extra = i - hunk_end_index + 1
+            return min(extra, cap) if extra > 0 else 0
+    return 0
+
+
+def _resolve_after_extra(file_lines, start1, size1, change_offset, fixed, allow_dynamic, cap) -> int:
+    """Extra lines to append below a hunk: close the enclosing block, or the fixed setting.
+
+    ``change_offset`` is the position of the first changed line within the hunk body
+    (-1 when the hunk contains no change, e.g. a pure-context hunk).
+    """
+    if allow_dynamic and cap > 0 and change_offset >= 0 and start1 > 0:
+        anchor = start1 - 1 + change_offset
+        dynamic = _dynamic_after_extra_lines(file_lines, anchor, start1 + size1 - 1, cap)
+        if dynamic > 0:
+            return dynamic
+    return fixed
+
+
 def process_patch_lines(patch_str, original_file_str, patch_extra_lines_before, patch_extra_lines_after, new_file_str=""):
     allow_dynamic_context = get_settings().config.allow_dynamic_context
     patch_extra_lines_before_dynamic = get_settings().config.max_extra_lines_before_dynamic_context
+    # 0 disables the forward (after) extension and restores the fixed setting below.
+    patch_extra_lines_after_dynamic = get_settings().config.get("max_extra_lines_after_dynamic_context", 0) or 0
+    after_extra_pending = patch_extra_lines_after
 
     file_original_lines = original_file_str.splitlines()
     file_new_lines = new_file_str.splitlines() if new_file_str else []
@@ -84,6 +150,11 @@ def process_patch_lines(patch_str, original_file_str, patch_extra_lines_before, 
 
     is_valid_hunk = True
     start1, size1, start2, size2 = -1, -1, -1, -1
+    # Position of the first changed line within the current hunk body (0-based, -1 = none).
+    # The forward extension anchors here rather than on the hunk tail, which often reaches
+    # into a nested block.
+    first_change_offset = -1
+    body_index = 0
     try:
         for i,line in enumerate(patch_lines):
             if line.startswith('@@'):
@@ -91,11 +162,17 @@ def process_patch_lines(patch_str, original_file_str, patch_extra_lines_before, 
                 # identify hunk header
                 if match:
                     # finish processing previous hunk
-                    if is_valid_hunk and (start1 != -1 and patch_extra_lines_after > 0):
-                        delta_lines_original = [f' {line}' for line in file_original_lines[start1 + size1 - 1:start1 + size1 - 1 + patch_extra_lines_after]]
+                    after_extra_pending = _resolve_after_extra(
+                        file_original_lines, start1, size1, first_change_offset,
+                        patch_extra_lines_after, allow_dynamic_context,
+                        patch_extra_lines_after_dynamic)
+                    if is_valid_hunk and (start1 != -1 and after_extra_pending > 0):
+                        delta_lines_original = [f' {line}' for line in file_original_lines[start1 + size1 - 1:start1 + size1 - 1 + after_extra_pending]]
                         extended_patch_lines.extend(delta_lines_original)
 
                     section_header, size1, size2, start1, start2 = extract_hunk_headers(match)
+                    first_change_offset = -1
+                    body_index = 0
 
                     is_valid_hunk = check_if_hunk_lines_matches_to_file(i, file_original_lines, patch_lines, start1)
 
@@ -186,14 +263,24 @@ def process_patch_lines(patch_str, original_file_str, patch_extra_lines_before, 
                         f'+{extended_start2},{extended_size2} @@ {section_header}')
                     extended_patch_lines.extend(delta_lines_original)  # one to zero based
                     continue
+            # Track the position of the first '+'/'-' line inside the hunk body; the file
+            # headers ('+++'/'---') are excluded and only ever precede the first hunk.
+            if start1 != -1 and not line.startswith(('+++', '---')):
+                if first_change_offset < 0 and line.startswith(('+', '-')):
+                    first_change_offset = body_index
+                body_index += 1
             extended_patch_lines.append(line)
     except Exception as e:
         get_logger().warning(f"Failed to extend patch: {e}", artifact={"traceback": traceback.format_exc()})
         return patch_str
 
     # finish processing last hunk
-    if start1 != -1 and patch_extra_lines_after > 0 and is_valid_hunk:
-        delta_lines_original = file_original_lines[start1 + size1 - 1:start1 + size1 - 1 + patch_extra_lines_after]
+    after_extra_pending = _resolve_after_extra(
+        file_original_lines, start1, size1, first_change_offset,
+        patch_extra_lines_after, allow_dynamic_context,
+        patch_extra_lines_after_dynamic)
+    if start1 != -1 and after_extra_pending > 0 and is_valid_hunk:
+        delta_lines_original = file_original_lines[start1 + size1 - 1:start1 + size1 - 1 + after_extra_pending]
         # add space at the beginning of each extra line
         delta_lines_original = [f' {line}' for line in delta_lines_original]
         extended_patch_lines.extend(delta_lines_original)
