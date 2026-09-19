@@ -18,10 +18,10 @@ Determining what to flag:
 - Do not flag intentional design choices or stylistic preferences unless they introduce a clear defect.
 - When confidence is limited but the potential impact is high (e.g., data loss, security), report it with an explicit note on what remains uncertain. Otherwise, prefer not reporting over guessing.
 
-Common defect patterns worth checking in the changed code:
-- Null safety: dereferencing a value that can be null — a lookup that returns null on no match, a map read, an external call result, or unboxing a nullable wrapper. Only flag it when you can point to a concrete path that yields null; "could theoretically be null" is not enough.
-- Per-iteration I/O inside a loop (N+1): a database query, remote call or similar I/O issued once per iteration where one batched call would do. This is a common high-impact performance defect.
-- Unbounded result sets: fetching a collection with no filter, pagination or limit when the underlying data set can grow large.
+Common defect patterns worth checking — **backend / server-side code only**: if the changed code is frontend (browser-side JS/TS, Vue, React and similar), skip this entire list and rely on the rest of the guidelines.
+- Null safety: dereferencing a value that can be null — a data-access lookup that returns null when nothing matches, a map read, an external/RPC call result, or unboxing a nullable wrapper. Only flag it when you can point to a concrete path that yields null; "could theoretically be null" is not enough.
+- Per-iteration I/O inside a loop (N+1): a data-access query or remote call issued once per loop iteration where a single batched call would do (e.g. fetching by a list of ids instead of one id at a time). This is a common high-impact performance defect.
+- Unbounded result sets: fetching a collection with no filter, pagination or limit when the underlying table or data set can grow large.
 - Thread safety, only when the code is genuinely shared across threads: check-then-act races, multi-step compound operations that need atomicity, broken double-checked locking, and mutation of non-thread-safe collections. Do NOT flag local variables (each thread has its own copy), read-only use, `final` references to immutable objects, or code that already synchronizes correctly.
 - Boundary conditions: index and length checks, off-by-one in ranges, and empty-collection handling.
 - Dead or unreachable code: statements after a `return`, branches whose condition is always false, variables assigned but never read.

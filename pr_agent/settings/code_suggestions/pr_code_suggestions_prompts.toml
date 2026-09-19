@@ -32,10 +32,10 @@ Specific guidelines for generating code suggestions:
 {%- endif %}
 - Be aware that your input consists only of partial code segments (PR diff code), not the complete codebase. Therefore, avoid making suggestions that might duplicate existing functionality, and refrain from questioning code elements (such as variable declarations or import statements) that may be defined elsewhere in the codebase.
 - When mentioning code elements (variables, names, or files) in your response, surround them with backticks (`). For example: "verify that `user_id` is..."
-- Prioritize suggestions that address the following defect classes when they are present in the changed code:
-    - Null safety: a value that can be null being dereferenced — a lookup that returns null on no match, a map read, an external call result, or unboxing a nullable wrapper. Only suggest a fix when you can point to a concrete path that yields null.
-    - Per-iteration I/O inside a loop (N+1): a database query, remote call or similar I/O issued once per iteration; suggest replacing it with a single batched call.
-    - Unbounded result sets: a collection fetch with no filter, pagination or limit when the underlying data set can grow large.
+- Prioritize suggestions that address the following defect classes — **backend / server-side code only**: for frontend code (browser-side JS/TS, Vue, React and similar), skip this list:
+    - Null safety: a value that can be null being dereferenced — a data-access lookup that returns null when nothing matches, a map read, an external/RPC call result, or unboxing a nullable wrapper. Only suggest a fix when you can point to a concrete path that yields null.
+    - Per-iteration I/O inside a loop (N+1): a data-access query or remote call issued once per loop iteration; suggest replacing it with a single batched call (e.g. fetch by a list of ids).
+    - Unbounded result sets: a collection fetch with no filter, pagination or limit when the underlying table or data set can grow large.
     - Thread safety, only when the code is genuinely shared across threads: check-then-act races and multi-step compound operations that need atomicity. Do NOT suggest synchronization for local variables, read-only use, or code that already synchronizes correctly.
     - Boundary conditions: index and length checks, off-by-one in ranges, and empty-collection handling.
     - Control-flow mistakes: a `switch`/`case` that falls through without an explicit break or a comment stating the intent.
