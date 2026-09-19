@@ -23,24 +23,36 @@ def _change(path, **kwargs):
 
 
 class DiffTransport(BaseAdapter):
-    def __init__(self, responses, metadata, metadata_responses=None):
+    def __init__(self, responses, metadata, metadata_responses=None, changes_responses=None):
         super().__init__()
         self.responses = iter(responses)
         self.metadata = metadata
         self.metadata_responses = iter(metadata_responses) if metadata_responses is not None else None
+        self.changes_responses = iter(changes_responses) if changes_responses is not None else None
         self.requests = []
 
     @property
     def diff_requests(self):
         return [request for request in self.requests if urlparse(request.url).path.endswith("/diffs")]
 
+    @property
+    def changes_requests(self):
+        return [request for request in self.requests if urlparse(request.url).path.endswith("/changes")]
+
     def send(self, request, **kwargs):
         self.requests.append(request)
         assert request.method == "GET"
-        if urlparse(request.url).path.endswith("/diffs"):
+        path = urlparse(request.url).path
+        if path.endswith("/diffs"):
             status, payload, headers = next(self.responses)
+        elif path.endswith("/changes"):
+            assert self.changes_responses is not None
+            status, payload, headers = next(self.changes_responses)
+        elif path.endswith("/versions"):
+            # python-gitlab's mr.diffs.list() targets the long-standing MR versions API.
+            status, payload, headers = (200, [], {})
         else:
-            assert urlparse(request.url).path.endswith("/merge_requests/7")
+            assert path.endswith("/merge_requests/7")
             status, payload, headers = (
                 next(self.metadata_responses) if self.metadata_responses is not None else (200, self.metadata, {})
             )
@@ -59,9 +71,9 @@ class DiffTransport(BaseAdapter):
 def provider_factory():
     sessions = []
 
-    def make(responses, count="2", project_id="group/sub/repo", metadata_responses=None):
+    def make(responses, count="2", project_id="group/sub/repo", metadata_responses=None, changes_responses=None):
         metadata = _metadata(count=count)
-        transport = DiffTransport(responses, metadata, metadata_responses)
+        transport = DiffTransport(responses, metadata, metadata_responses, changes_responses)
         session = requests.Session()
         session.mount("https://", transport)
         sessions.append(session)
@@ -178,18 +190,21 @@ def test_later_page_failure_does_not_cache_a_prefix_and_can_retry(provider_facto
 
 
 @pytest.mark.parametrize("method", ["get_files", "get_diff_files", "get_pr_file_paths", "get_relevant_diff"])
-def test_missing_diffs_endpoint_propagates_without_fallback(provider_factory, method):
-    provider, transport = provider_factory([
-        (404, {"message": "original missing endpoint"}, {}),
-    ])
+def test_missing_diffs_endpoint_falls_back_to_legacy_changes(provider_factory, method):
+    # Fork divergence from upstream #3491: upstream makes the paginated /diffs endpoint
+    # (GitLab 15.7+) a hard requirement and lets a 404 propagate. Servers older than 15.7
+    # only serve the legacy /changes endpoint, so fall back to it rather than failing the
+    # whole review. See also test_other_errors_do_not_probe_version_or_use_legacy: any
+    # non-404 error still propagates untouched.
+    provider, transport = provider_factory(
+        [(404, {"message": "original missing endpoint"}, {})],
+        count="1",
+        changes_responses=[(200, {"changes": [_change("a.py")]}, {})],
+    )
     args = ["a.py", "new"] if method == "get_relevant_diff" else []
-    with pytest.raises(gitlab.GitlabHttpError, match="original missing endpoint") as error:
-        getattr(provider, method)(*args)
-    assert error.value.response_code == 404
-    assert provider.git_files is None
-    assert provider.diff_files is None
-    provider.get_pr_file_content.assert_not_called()
-    assert [urlparse(request.url).path.rsplit("/", 1)[-1] for request in transport.requests] == ["7", "diffs"]
+    getattr(provider, method)(*args)
+    assert len(transport.diff_requests) == 1
+    assert len(transport.changes_requests) == 1
 
 
 @pytest.mark.parametrize("status", [401, 403, 500])
@@ -228,7 +243,7 @@ def test_incremental_filter_propagates_known_incomplete_response(provider_factor
     assert provider.unreviewed_files_map == {}
 
 
-@pytest.mark.parametrize("status", [404, 503])
+@pytest.mark.parametrize("status", [503])
 def test_incremental_filter_retains_best_effort_on_http_failure(provider_factory, status):
     provider, transport = provider_factory([(status, {"message": "unavailable"}, {})])
     _prepare_incremental(provider)
@@ -370,3 +385,43 @@ def test_incremental_ref_movement_falls_back_to_fresh_full_collection(provider_f
     ])
     assert len(transport.diff_requests) == 2
     assert len(transport.requests) == 6
+
+
+def test_falls_back_to_legacy_changes_endpoint_when_diffs_is_unavailable(provider_factory):
+    """GitLab < 15.7 has no paginated /diffs endpoint and answers 404, so the provider must
+    fall back to the legacy /changes endpoint to keep those servers working."""
+    provider, transport = provider_factory(
+        [(404, {"message": "404 Not Found"}, {})],
+        count="1",
+        changes_responses=[(200, {"changes": [_change("legacy.py")]}, {})],
+    )
+
+    files = provider.get_diff_files()
+
+    assert [file.filename for file in files] == ["legacy.py"]
+    assert len(transport.diff_requests) == 1
+    assert len(transport.changes_requests) == 1
+
+
+def test_legacy_fallback_tolerates_a_truncated_file_list(provider_factory):
+    """The legacy endpoint is capped by diff_max_files, so a file list shorter than
+    changes_count is expected there and must not be reported as an incomplete collection."""
+    provider, transport = provider_factory(
+        [(404, {"message": "404 Not Found"}, {})],
+        count="150",
+        changes_responses=[(200, {"changes": [_change("only.py")]}, {})],
+    )
+
+    files = provider.get_diff_files()
+
+    assert [file.filename for file in files] == ["only.py"]
+
+
+def test_non_404_diff_errors_are_not_swallowed(provider_factory):
+    """Only a missing endpoint triggers the fallback; real server errors must still surface."""
+    provider, transport = provider_factory([(500, {"message": "boom"}, {})], count="1")
+
+    with pytest.raises(gitlab.exceptions.GitlabHttpError):
+        provider.get_diff_files()
+
+    assert not transport.changes_requests

@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import gitlab
-from gitlab import GitlabAuthenticationError, GitlabCreateError, GitlabGetError, GitlabUpdateError
+from gitlab import GitlabAuthenticationError, GitlabCreateError, GitlabGetError, GitlabHttpError, GitlabUpdateError
 
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 
@@ -524,13 +524,33 @@ class GitLabProvider(GitProvider):
                 })
         return out
 
+    def _list_merge_request_diffs(self, path: str) -> Tuple[list, bool]:
+        """List an MR's changed files, preferring the paginated endpoint.
+
+        The paginated `/diffs` endpoint only exists on GitLab 15.7+; older servers answer
+        404, so fall back to the legacy `/changes` endpoint (unpaginated, and capped by
+        `diff_max_files`).
+
+        Returns the file list and whether the paginated endpoint was available.
+        """
+        try:
+            return self.gl.http_list(f"{path}/diffs", get_all=True), True
+        except GitlabHttpError as error:
+            if getattr(error, "response_code", None) != 404:
+                raise
+            get_logger().warning(
+                f"GitLab merge request {self.id_mr}: /diffs endpoint unavailable "
+                f"(requires GitLab 15.7+); falling back to the legacy /changes endpoint"
+            )
+            return self.gl.http_get(f"{path}/changes").get("changes", []), False
+
     def _get_merge_request_changes(self) -> dict:
         """Collect all MR diff pages with stable metadata and their matching refs."""
         project_id = quote(str(self.id_project), safe="")
         path = f"/projects/{project_id}/merge_requests/{self.id_mr}"
         for attempt in range(2):
             before = self.gl.http_get(path)
-            changes = self.gl.http_list(f"{path}/diffs", get_all=True)
+            changes, is_paginated = self._list_merge_request_diffs(path)
             after = self.gl.http_get(path)
             if any(before.get(key) != after.get(key) for key in ("sha", "diff_refs", "changes_count")):
                 if attempt == 0:
@@ -540,7 +560,10 @@ class GitLabProvider(GitProvider):
                 )
 
             changes_count = after.get("changes_count")
-            if isinstance(changes_count, str):
+            # The legacy /changes endpoint cannot page, so its file list may legitimately
+            # trail changes_count on large MRs; the completeness checks below only hold
+            # where the server can return every page.
+            if is_paginated and isinstance(changes_count, str):
                 if not changes_count or changes_count.endswith("+"):
                     raise IncompleteGitLabDiffError(
                         f"GitLab merge request {self.id_mr} diff collection is incomplete or not ready"
