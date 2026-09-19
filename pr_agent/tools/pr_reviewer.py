@@ -28,6 +28,7 @@ from pr_agent.algo.pr_processing import (
     retry_with_fallback_models,
 )
 from pr_agent.algo.prompt_fragments import render_diff_hunk_format
+from pr_agent.algo.reference_context import build_reference_context
 from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.review_finding_state import (
     append_review_state,
@@ -54,6 +55,7 @@ from pr_agent.algo.utils import (
     render_hidden_marker,
     show_relevant_configurations,
     show_run_details,
+    signal_publish_gate,
 )
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import get_git_provider_with_context
@@ -233,6 +235,13 @@ class PRReviewer:
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
             "skills_context": get_skills_context(),
             "repo_context": build_repo_context(self.git_provider),
+            # Opt-in: only look up cross-file references when a checkout is configured, so the
+            # default path does not pay for reading the diff files here.
+            "reference_context": (
+                build_reference_context(self.git_provider.get_diff_files())
+                if get_settings().config.get("reference_context_root", "")
+                else ""
+            ),
             "commit_messages_str": self.git_provider.get_commit_messages(),
             "custom_labels": "",
             "enable_custom_labels": get_settings().config.enable_custom_labels,
@@ -446,6 +455,9 @@ class PRReviewer:
                     )
                     pr_review = add_pr_review_identity(pr_review, identity_marker, self.git_provider)
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
+            # Release a concurrently running peer (e.g. /improve) that is waiting to publish
+            # after this review, so the comment order is deterministic. No-op unless configured.
+            signal_publish_gate()
         except Exception as e:
             review_error = e
             review_failed = True

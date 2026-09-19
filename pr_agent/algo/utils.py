@@ -9,6 +9,7 @@ import re
 import string
 import sys
 import textwrap
+import time
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
@@ -1764,6 +1765,58 @@ def _push_outputs_sink_url(cfg: dict, key: str) -> str:
         get_logger().warning(f"push_outputs: ignoring {key}, expected an absolute https:// URL")
         return ''
     return url
+
+
+def signal_publish_gate() -> None:
+    """Announce that this run has published its comment, releasing a waiting peer.
+
+    Cross-process ordering helper. When two tools publish to the same PR concurrently
+    (/review and /improve in one CI job), configure the same `config.publish_gate_file`
+    for both and give them different roles: the "signaler" writes the file after
+    publishing, the "waiter" blocks on it before publishing, so the resulting comment
+    order is deterministic instead of whichever process happens to finish first.
+
+    No-op unless `config.publish_gate_role` is "signaler" and a file is configured.
+    """
+    if get_settings().config.get("publish_gate_role", "") != "signaler":
+        return
+    path = get_settings().config.get("publish_gate_file", "")
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("published\n")
+        get_logger().info(f"publish gate: signalled {path}")
+    except Exception as error:
+        # The gate is a best-effort ordering aid; never fail a publish over it.
+        get_logger().warning(f"publish gate: could not write {path}: {error}")
+
+
+def wait_on_publish_gate() -> None:
+    """Block until the signalling peer has published, up to the configured timeout.
+
+    Counterpart of `signal_publish_gate`. No-op unless `config.publish_gate_role` is
+    "waiter" and a file is configured. A timeout only warns: a peer that crashed must
+    not stop this tool from publishing.
+    """
+    if get_settings().config.get("publish_gate_role", "") != "waiter":
+        return
+    path = get_settings().config.get("publish_gate_file", "")
+    if not path:
+        return
+    try:
+        timeout = float(get_settings().config.get("publish_gate_timeout_seconds", 300) or 300)
+    except (TypeError, ValueError):
+        timeout = 300.0
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            get_logger().info(f"publish gate: released by {path}")
+            return
+        time.sleep(0.5)
+    get_logger().warning(
+        f"publish gate: timed out after {timeout:.0f}s waiting for {path}; publishing anyway"
+    )
 
 
 def push_outputs(message_type: str, payload: dict | None = None, markdown: str | None = None) -> None:
