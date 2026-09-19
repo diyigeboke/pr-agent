@@ -99,15 +99,23 @@ def find_references(
     extensions: Sequence[str],
     skip_file: str = "",
     max_scanned_files: int = 20000,
-) -> List[Tuple[str, int, str]]:
+    context_lines: int = 0,
+) -> List[Tuple[str, int, int, str]]:
     """Grep ``root`` for other references to ``symbol``.
 
-    Returns (relative_path, line_number, stripped_line) tuples, capped at ``max_hits``.
+    Returns (relative_path, first_line, last_line, block_text) tuples, where block_text
+    holds the hit plus ``context_lines`` of surrounding source on each side. Callers that
+    want to judge *why* a call site is safe (an up-front null check, an already-batched
+    input) need that surrounding code: the single matching line rarely carries it.
+
+    Nearby hits in the same file are merged into one block so shared context is not repeated.
     Matching is by word boundary, so ``Foo`` does not match ``FooBar``.
     """
     pattern = re.compile(rf"\b{re.escape(symbol)}\b")
-    hits: List[Tuple[str, int, str]] = []
+    context_lines = max(0, context_lines)
+    results: List[Tuple[str, int, int, str]] = []
     scanned = 0
+    sites = 0
     skip_abs = os.path.abspath(skip_file) if skip_file else ""
 
     for dirpath, dirnames, filenames in os.walk(root):
@@ -123,22 +131,45 @@ def find_references(
                 get_logger().warning(
                     f"reference context: scanned {max_scanned_files} files, stopping lookup for {symbol}"
                 )
-                return hits
+                return results
             try:
                 if path.stat().st_size > 2_000_000:
                     continue
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                if pattern.search(line):
-                    # Emit POSIX separators: these paths sit next to diff file names, which
-                    # always use forward slashes regardless of the host platform.
-                    rel = path.relative_to(root).as_posix()
-                    hits.append((rel, lineno, line.strip()[:160]))
-                    if len(hits) >= max_hits:
-                        return hits
-    return hits
+
+            lines = text.splitlines()
+            matched = [idx for idx, line in enumerate(lines) if pattern.search(line)]
+            if not matched:
+                continue
+
+            # max_hits bounds reference *sites*, not rendered blocks: merging below is a
+            # rendering optimisation, so counting blocks would let one dense region blow
+            # past the intended output bound.
+            remaining = max_hits - sites
+            if remaining <= 0:
+                return results
+            matched = matched[:remaining]
+            sites += len(matched)
+
+            # Merge hits that would share context, so one region is emitted once.
+            groups: List[List[int]] = []
+            for idx in matched:
+                if groups and idx - groups[-1][-1] <= 2 * context_lines + 1:
+                    groups[-1].append(idx)
+                else:
+                    groups.append([idx])
+
+            # Emit POSIX separators: these paths sit next to diff file names, which
+            # always use forward slashes regardless of the host platform.
+            rel = path.relative_to(root).as_posix()
+            for group in groups:
+                first = max(0, group[0] - context_lines)
+                last = min(len(lines) - 1, group[-1] + context_lines)
+                block = "\n".join(f"        {line}" for line in lines[first:last + 1])
+                results.append((rel, first + 1, last + 1, block))
+    return results
 
 
 def build_reference_context(diff_files: Iterable, max_chars: int | None = None) -> str:
@@ -158,6 +189,7 @@ def build_reference_context(diff_files: Iterable, max_chars: int | None = None) 
 
     max_symbols = _as_int(get_settings().config.get("reference_context_max_symbols", 10), 10)
     max_hits = _as_int(get_settings().config.get("reference_context_max_hits_per_symbol", 5), 5)
+    context_lines = _as_int(get_settings().config.get("reference_context_context_lines", 3), 3)
     if max_chars is None:
         max_chars = _as_int(get_settings().config.get("reference_context_max_chars", 6000), 6000)
     extensions = get_settings().config.get("reference_context_extensions", None) or _DEFAULT_EXTENSIONS
@@ -169,16 +201,21 @@ def build_reference_context(diff_files: Iterable, max_chars: int | None = None) 
         filename = getattr(diff_file, "filename", "") or ""
         symbols = extract_changed_symbols(getattr(diff_file, "patch", "") or "", filename)[:max_symbols]
         for symbol in symbols:
-            hits = find_references(root, symbol, max_hits, extensions, skip_file=filename)
+            hits = find_references(
+                root, symbol, max_hits, extensions,
+                skip_file=filename, context_lines=context_lines,
+            )
             if not hits:
                 continue
-            rendered = "\n".join(f"    {path}:{lineno}  {line}" for path, lineno, line in hits)
-            block = f"- `{symbol}` is also referenced in:\n{rendered}"
-            if used + len(block) > max_chars:
+            rendered = "\n".join(
+                f"    {path}:{first}-{last}\n{source}" for path, first, last, source in hits
+            )
+            section = f"- `{symbol}` is also referenced in:\n{rendered}"
+            if used + len(section) > max_chars:
                 get_logger().info("reference context: character budget reached; truncating")
                 return "\n".join(sections)
-            sections.append(block)
-            used += len(block)
+            sections.append(section)
+            used += len(section)
 
     if not sections:
         return ""

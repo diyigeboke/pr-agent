@@ -59,6 +59,7 @@ repo_context_max_sibling_files = 5 # Maximum number of sibling-repository files 
 reference_context_root="" # absolute path to a local checkout, e.g. "/builds/group/project"
 reference_context_max_symbols=10 # most symbols looked up per changed file
 reference_context_max_hits_per_symbol=5 # most reference sites rendered per symbol
+reference_context_context_lines=3 # source lines shown either side of each reference, so a caller's own guards are visible (without them the hit is just a call site and cannot be judged)
 reference_context_max_chars=6000 # total character budget for the whole block
 reference_context_extensions=[] # file extensions worth scanning; empty = a built-in default set
 # token limits

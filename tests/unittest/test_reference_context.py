@@ -13,6 +13,7 @@ KEYS = [
     "config.reference_context_root",
     "config.reference_context_max_symbols",
     "config.reference_context_max_hits_per_symbol",
+    "config.reference_context_context_lines",
     "config.reference_context_max_chars",
     "config.reference_context_extensions",
 ]
@@ -70,18 +71,52 @@ def test_find_references_matches_word_boundaries_and_skips_the_changed_file(tmp_
         tmp_path, "countByEventIds", max_hits=10,
         extensions=(".java",), skip_file=str(tmp_path / "src" / "Self.java"),
     )
-    paths = [p for p, _, _ in hits]
+    paths = [p for p, _, _, _ in hits]
     assert "src/Caller.java" in paths
     assert "src/Self.java" not in paths, "the file under review must be excluded"
     assert "src/Unrelated.java" not in paths, "word boundaries must prevent suffix matches"
 
 
 def test_find_references_respects_the_cap(tmp_path):
+    """max_hits bounds reference sites; separate regions stay separate blocks."""
     (tmp_path / "Hit.java").write_text(
-        "\n".join("void f%d() { Foo.bar(); }" % i for i in range(20)), encoding="utf-8"
+        "\n\n".join("void f%d() { Foo.bar(); }" % i for i in range(20)), encoding="utf-8"
     )
-    hits = find_references(tmp_path, "Foo", max_hits=3, extensions=(".java",))
+    hits = find_references(tmp_path, "Foo", max_hits=3, extensions=(".java",), context_lines=0)
     assert len(hits) == 3
+
+
+def test_find_references_includes_surrounding_source(tmp_path):
+    """The caller's own guards must be visible: a lone call site cannot be judged."""
+    (tmp_path / "Caller.java").write_text(
+        "class Caller {\n"
+        "    void send(String id) {\n"
+        "        if (id == null) {\n"
+        "            return;\n"
+        "        }\n"
+        "        Helper.run(id);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    hits = find_references(tmp_path, "Helper", max_hits=5, extensions=(".java",), context_lines=3)
+    assert len(hits) == 1
+    path, first, last, block = hits[0]
+    assert path == "Caller.java"
+    # match is on line 6 (0-based 5); 3 lines of context reach back to line 3 and forward to line 8
+    assert first == 3 and last == 8
+    assert "if (id == null)" in block, "the caller's null check must be included"
+    assert "Helper.run(id)" in block
+
+
+def test_find_references_merges_nearby_hits(tmp_path):
+    """Two hits sharing context should render as one block, not two overlapping ones."""
+    (tmp_path / "Pair.java").write_text(
+        "class Pair {\n    void a() { Helper.run(1); }\n    void b() { Helper.run(2); }\n}\n",
+        encoding="utf-8",
+    )
+    hits = find_references(tmp_path, "Helper", max_hits=5, extensions=(".java",), context_lines=3)
+    assert len(hits) == 1, "adjacent hits within the context window must merge"
 
 
 # --- rendering ---------------------------------------------------------------
