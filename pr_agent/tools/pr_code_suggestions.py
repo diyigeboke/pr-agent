@@ -518,32 +518,11 @@ class PRCodeSuggestions:
             if get_settings().get('config', {}).get('output_run_details', False):
                 pr_body += show_run_details(self.git_provider.is_supported("gfm_markdown"))
             get_logger().debug("PR output", artifact=pr_body)
-            if self.progress_response:
-                progress_response = self.progress_response
-                if _edit_comment_safely(self.git_provider, progress_response, pr_body):
-                    if self._improve_thread_kwargs():
-                        # A mere status message isn't actionable; resolve the thread instead of
-                        # leaving it open for the user to close manually.
-                        self.git_provider.resolve_comment_thread(progress_response.id)
-                else:
-                    try:
-                        comment = self.git_provider.publish_comment(
-                            pr_body, **self._improve_thread_kwargs()
-                        )
-                        if comment and self._improve_thread_kwargs():
-                            self.git_provider.resolve_comment_thread(comment.id)
-                    finally:
-                        try:
-                            self.git_provider.remove_comment(progress_response)
-                        except Exception as cleanup_error:
-                            get_logger().warning(
-                                f"Failed to remove the failed progress comment: {cleanup_error}"
-                            )
-                        self.progress_response = None
-            else:
-                comment = self.git_provider.publish_comment(pr_body, **self._improve_thread_kwargs())
-                if comment and self._improve_thread_kwargs():
-                    self.git_provider.resolve_comment_thread(comment.id)
+            comment = self._publish_final_comment(pr_body, **self._improve_thread_kwargs())
+            if comment and self._improve_thread_kwargs():
+                # A mere status message isn't actionable; resolve the thread instead of
+                # leaving it open for the user to close manually.
+                self.git_provider.resolve_comment_thread(comment.id)
         else:
             get_settings().data = {"artifact": pr_body if coverage_footer else ""}
             if self.progress_response:
@@ -571,6 +550,27 @@ class PRCodeSuggestions:
     def _improve_thread_kwargs(self) -> dict:
         # Providers that support it (GitLab) can post the suggestions comment as a resolvable thread.
         return {"as_thread": True} if self.git_provider.should_publish_improve_as_thread() else {}
+
+    def _publish_final_comment(self, pr_body: str, **kwargs):
+        """Publish the final suggestions comment as a NEW comment, then drop the progress note.
+
+        Local deviation from upstream, which edits the progress note into the final comment.
+        GitLab orders merge-request comments by CREATION time, and the progress note is published
+        before wait_on_publish_gate(), so reusing it stamps the final comment with a creation time
+        that precedes /review's -- pinning /improve on top no matter what order the gate enforced.
+        Creating a fresh comment places it after the gate. The progress note keeps its upstream
+        lifecycle otherwise: the cancellation and failure paths still write to it, because they
+        all run before this point.
+        """
+        comment = self.git_provider.publish_comment(pr_body, **kwargs)
+        note = self.progress_response
+        if note is not None:
+            try:
+                self.git_provider.remove_comment(note)
+            except Exception as cleanup_error:
+                get_logger().warning(f"Failed to remove the progress comment: {cleanup_error}")
+            self.progress_response = None
+        return comment
 
     @staticmethod
     def publish_persistent_comment_with_history(git_provider: GitProvider,
@@ -813,21 +813,11 @@ class PRCodeSuggestions:
             f"{initial_header}\n\n{latest_commit_html_comment}\n\n"
             f"{new_suggestion_table}\n\n"
         )
-        if progress_response:
-            if not _edit_comment_safely(git_provider, progress_response, pr_comment):
-                new_comment = git_provider.publish_comment(
-                    pr_comment,
-                    **({"as_thread": True} if as_thread else {}),
-                )
-                if new_comment is not None:
-                    try:
-                        git_provider.remove_comment(progress_response)
-                    except Exception as remove_error:
-                        get_logger().warning(f"Failed to remove progress note: {remove_error}")
-            else:
-                new_comment = progress_response
-        else:
-            new_comment = git_provider.publish_comment(pr_comment, **({"as_thread": True} if as_thread else {}))
+        # Local deviation from upstream: CREATE the comment instead of editing the progress note
+        # into it -- see _publish_final_comment for why the creation time must follow the gate.
+        new_comment = git_provider.publish_comment(pr_comment, **({"as_thread": True} if as_thread else {}))
+        if new_comment is not None:
+            _clean_up_progress_note()
         return new_comment
 
     async def _prepare_prediction(self, model: str) -> dict:

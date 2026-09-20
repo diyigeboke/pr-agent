@@ -181,13 +181,22 @@ async def test_run_does_not_publish_failure_after_successful_summary(monkeypatch
 
         await tool.run()
 
-        provider.edit_comment.assert_called_once()
-        if "body" in provider.edit_comment.call_args.kwargs:
-            published_body = provider.edit_comment.call_args.kwargs["body"]
+        if persistent_comment:
+            # Local deviation from upstream: a NEW comment carries the summary and the progress
+            # note is dropped, rather than the progress note being edited into the final comment
+            # (see _publish_final_comment). Only the persistent path is changed.
+            call = provider.publish_comment.call_args
+            published_body = call.kwargs.get("body", call.args[0])
+            assert "final summary" in published_body
+            assert provider.publish_comment.call_count == 2, "progress note + final comment"
         else:
-            published_body = provider.edit_comment.call_args.args[1]
-        assert "final summary" in published_body
-        provider.publish_comment.assert_called_once_with("progress body")
+            provider.edit_comment.assert_called_once()
+            if "body" in provider.edit_comment.call_args.kwargs:
+                published_body = provider.edit_comment.call_args.kwargs["body"]
+            else:
+                published_body = provider.edit_comment.call_args.args[1]
+            assert "final summary" in published_body
+            provider.publish_comment.assert_called_once_with("progress body")
     finally:
         restore_settings(settings_snapshot)
 
@@ -316,10 +325,12 @@ async def test_run_does_not_remove_persistent_summary_when_cancelled_during_dual
         with pytest.raises(asyncio.CancelledError):
             await tool.run()
 
-        provider.edit_comment.assert_called_once()
-        assert provider.edit_comment.call_args.args[0] is progress_comment
-        assert "final summary" in provider.edit_comment.call_args.args[1]
-        provider.remove_comment.assert_not_called()
+        # Local deviation from upstream: the summary is published as a NEW comment and the
+        # progress note is dropped, instead of the progress note being edited into the final
+        # comment (see _publish_final_comment).
+        final_body = provider.publish_comment.call_args.args[0]
+        assert "final summary" in final_body
+        provider.remove_comment.assert_called_once_with(progress_comment)
         assert tool.progress_response is None
     finally:
         restore_settings(settings_snapshot)

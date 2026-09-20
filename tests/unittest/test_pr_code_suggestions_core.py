@@ -1544,10 +1544,13 @@ async def test_publish_no_suggestions_still_overwrites_the_progress_comment_when
 
     await tool.publish_no_suggestions()
 
-    call = git_provider.edit_comment.call_args
-    edited_body = call.kwargs.get("body", call.args[1])
-    assert "No code suggestions found for the PR." in edited_body
-    git_provider.remove_comment.assert_not_called()
+    # Local deviation from upstream: the status is published as a NEW comment and the progress
+    # note is dropped, rather than overwriting the progress note in place -- see
+    # _publish_final_comment for why the final comment's creation time has to follow the gate.
+    call = git_provider.publish_comment.call_args
+    published_body = call.kwargs.get("body", call.args[0])
+    assert "No code suggestions found for the PR." in published_body
+    git_provider.remove_comment.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2249,25 +2252,20 @@ def test_custom_heading_is_kept_when_a_history_section_already_exists():
     provider.publish_comment.assert_not_called()
 
 
-@pytest.mark.parametrize("raises", [False, True], ids=["returns-false", "raises"])
-def test_first_persistent_improve_edit_failure_publishes_visible_fallback(raises):
+def test_first_persistent_improve_creates_the_comment_and_drops_the_progress_note():
+    """Local deviation from upstream, which edits the progress note into the first comment.
+
+    There is no edit any more, so the edit-failure fallback it used to exercise is gone with it:
+    the comment is always created, which is what places its creation time after the publish gate.
+    """
     provider = MagicMock()
     provider.get_issue_comments.return_value = []
     provider.get_latest_commit_url.return_value = "https://example.test/commit/deadbee"
     progress = MagicMock()
     fallback = MagicMock()
     provider.publish_comment.return_value = fallback
-    if raises:
-        provider.edit_comment.side_effect = RuntimeError("edit failed")
-    else:
-        provider.edit_comment.return_value = False
 
     header = "## PR Code Suggestions " + chr(0x2728)
-    new_comment = (
-        header + "\n\n"
-        + PRCodeSuggestionsIdentity.SUMMARY.value + "\n\n"
-        + "<!-- deadbee -->\n\n<table>new suggestions</table>\n\n"
-    )
     result = PRCodeSuggestions.publish_persistent_comment_with_history(
         provider,
         header + "\n\n<table>new suggestions</table>",
@@ -2280,7 +2278,8 @@ def test_first_persistent_improve_edit_failure_publishes_visible_fallback(raises
     )
 
     assert result is fallback
-    provider.edit_comment.assert_called_once_with(progress, new_comment)
+    # The final comment is never edited into the progress note; _clean_up_progress_note does
+    # touch the note ("published in the persistent thread above") before deleting it.
     provider.publish_comment.assert_called_once()
     provider.remove_comment.assert_called_once_with(progress)
 

@@ -372,10 +372,13 @@ async def test_publish_no_suggestions_resolves_thread_instead_of_replacing_it():
 
         await tool.publish_no_suggestions()
 
-        git_provider.edit_comment.assert_called_once()
-        assert git_provider.edit_comment.call_args.args[0] is progress_comment
-        git_provider.remove_comment.assert_not_called()
-        git_provider.resolve_comment_thread.assert_called_once_with(7)
+        # Local deviation from upstream: the status is published as a NEW comment (and the
+        # progress note is dropped) instead of replacing the progress note in place, so the
+        # final comment's creation time follows the publish gate. See _publish_final_comment.
+        published = git_provider.publish_comment.return_value
+        git_provider.publish_comment.assert_called_once()
+        git_provider.remove_comment.assert_called_once_with(progress_comment)
+        git_provider.resolve_comment_thread.assert_called_once_with(published.id)
     finally:
         restore_settings(snapshot)
 
@@ -395,7 +398,9 @@ async def test_publish_no_suggestions_does_not_resolve_when_not_threaded():
 
         await tool.publish_no_suggestions()
 
-        git_provider.edit_comment.assert_called_once()
+        # Local deviation from upstream: published as a new comment rather than replacing the
+        # progress note in place (see _publish_final_comment).
+        git_provider.publish_comment.assert_called_once()
         git_provider.resolve_comment_thread.assert_not_called()
     finally:
         restore_settings(snapshot)
