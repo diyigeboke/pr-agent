@@ -28,7 +28,6 @@ from pr_agent.algo.pr_processing import (
     retry_with_fallback_models,
 )
 from pr_agent.algo.prompt_fragments import render_diff_hunk_format
-from pr_agent.algo.reference_context import build_reference_context
 from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.review_finding_state import (
     append_review_state,
@@ -235,13 +234,6 @@ class PRReviewer:
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
             "skills_context": get_skills_context(),
             "repo_context": build_repo_context(self.git_provider),
-            # Opt-in: only look up cross-file references when a checkout is configured, so the
-            # default path does not pay for reading the diff files here.
-            "reference_context": (
-                build_reference_context(self.git_provider.get_diff_files())
-                if get_settings().config.get("reference_context_root", "")
-                else ""
-            ),
             "commit_messages_str": self.git_provider.get_commit_messages(),
             "custom_labels": "",
             "enable_custom_labels": get_settings().config.enable_custom_labels,

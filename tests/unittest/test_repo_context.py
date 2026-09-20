@@ -1740,9 +1740,6 @@ def test_prompt_templates_render_configured_repo_context(prompt_name, variables)
 
     # select_autoescape() leaves string templates unescaped (matching production prompt rendering)
     # while avoiding the hard-coded autoescape=False that static analysis flags.
-    # The prompt renders with StrictUndefined, so every referenced variable must be present;
-    # these cases exercise repo_context, so the sibling reference-context block is simply empty.
-    variables.setdefault("reference_context", "")
     environment = Environment(autoescape=select_autoescape(default_for_string=False), undefined=StrictUndefined)
     rendered = environment.from_string(template).render(variables)
 
