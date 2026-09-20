@@ -75,7 +75,6 @@ image_input_token_allowance=4096 # reserve tokens per image when provider counti
 patch_extension_skip_types =[".md",".txt"]
 allow_dynamic_context=true
 max_extra_lines_before_dynamic_context = 10 # will try to include up to 10 extra lines before the hunk in the patch, until we reach an enclosing function or class
-max_extra_lines_after_dynamic_context = 10 # how far below the hunk to extend so the enclosing block is closed (the before-side mirrors this by extending up to the declaration). 0 disables it and restores patch_extra_lines_after. Keep it modest: when git reports a coarser boundary than the changed method (it reports the class for Java methods, and export default for Vue Options API), the extension follows that boundary, so a large value costs more for less.
 patch_extra_lines_before = 5 # Number of extra lines (+3 default ones) to include before each hunk in the patch
 patch_extra_lines_after = 1 # Number of extra lines (+3 default ones) to include after each hunk in the patch
 secret_provider="" # "" (disabled), "google_cloud_storage", or "aws_secrets_manager" for secure secret management
